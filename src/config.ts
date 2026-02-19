@@ -1,6 +1,6 @@
 import "dotenv/config";
 import { createPublicClient, http, type Hex } from "viem";
-import { mainnet } from "viem/chains";
+import { base } from "viem/chains";
 import { entryPoint07Address } from "viem/account-abstraction";
 import { createPimlicoClient } from "permissionless/clients/pimlico";
 
@@ -24,7 +24,7 @@ export const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? "anthropic/claud
 const PIMLICO_API_KEY = requireEnv("PIMLICO_API_KEY");
 const RPC_URL = requireEnv("RPC_URL");
 
-export const chain = mainnet;
+export const chain = base;
 
 export const publicClient = createPublicClient({
   chain,

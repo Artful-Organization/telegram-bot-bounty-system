@@ -76,10 +76,7 @@ bot.api.config.use(async (prev, method, payload, signal) => {
   return result;
 });
 
-const explorerBaseUrl =
-  (chain.id as number) === 1
-    ? "https://etherscan.io"
-    : `https://${chain.name}.etherscan.io`;
+const explorerBaseUrl = "https://basescan.org";
 
 function log(command: string, userId: string, username: string | null, details: string) {
   const ts = new Date().toISOString();
