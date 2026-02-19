@@ -12,7 +12,7 @@ import {
 import { Bounty } from "../db/models/bounty.model.js";
 
 function escapeRegex(s: string): string {
-  return s;
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export type NotifyRecipientFn = (
