@@ -12,7 +12,7 @@ import {
 import { Bounty } from "../db/models/bounty.model.js";
 
 function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return s;
 }
 
 export type NotifyRecipientFn = (
@@ -70,7 +70,7 @@ const getUsersTool = tool(
       : {};
 
     const users = await User.find(filter)
-      .select("-privateKey -__v")
+      .select("telegramId username displayName smartAccountAddress createdAt")
       .lean();
 
     if (users.length === 0) {
@@ -79,19 +79,27 @@ const getUsersTool = tool(
         : "No users registered yet.";
     }
 
-    return JSON.stringify(users);
+    const mapped = users.map((u) => ({
+      telegramId: u.telegramId,
+      username: u.username ?? null,
+      displayName: u.displayName ?? null,
+      address: u.smartAccountAddress,
+      createdAt: u.createdAt,
+    }));
+
+    return JSON.stringify(mapped);
   },
   {
     name: "get_users",
     description:
       "Search registered users by Telegram ID, username, or display name (partial, case-insensitive). " +
       "Omit search to list all users. " +
-      "Returns telegramId, username, displayName, smartAccountAddress, isDeployed, and createdAt.",
+      "Returns telegramId, username, displayName, address, and createdAt.",
     schema: z.object({
       search: z
         .string()
         .optional()
-        .describe("Search by Telegram ID (exact), or username/display name (case-insensitive, partial match). Don't use @ prefix."),
+        .describe("Search by Telegram ID (exact), or username/display name (case-insensitive, partial match). Don't use @ prefix. Leave blank to list all users."),
     }),
   },
 );
@@ -207,11 +215,18 @@ function createListBountiesTool(ctx: ToolContext) {
       }
 
       const symbol = await getTokenSymbol();
-      const lines = bounties.map((b) => {
-        const poster = b.creatorUsername ? `@${b.creatorUsername}` : (b.creatorDisplayName ?? "Unknown");
-        return `#${b.shortId} — ${b.amount} $${symbol}: ${b.description} (by ${poster})`;
-      });
-      return lines.join("\n");
+      const mapped = bounties.map((b) => ({
+        id: b.shortId,
+        creatorTelegramId: b.creatorTelegramId,
+        creatorUsername: b.creatorUsername ?? null,
+        description: b.description,
+        amount: `${b.amount} $${symbol}`,
+        status: b.status,
+        claimerTelegramId: b.claimerTelegramId ?? null,
+        createdAt: b.createdAt,
+        completedAt: b.completedAt ?? null,
+      }));
+      return JSON.stringify(mapped);
     },
     {
       name: "list_bounties",
