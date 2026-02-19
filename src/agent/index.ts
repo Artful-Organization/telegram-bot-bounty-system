@@ -47,18 +47,23 @@ async function loadChatHistory(chatId: string) {
 export async function invokeAgent(
   chatId: string,
   ctx: ToolContext,
+  replyToText?: string,
 ): Promise<string> {
   const userTag = ctx.senderUsername ? `@${ctx.senderUsername}` : ctx.senderDisplayName;
-  console.log(`[agent] invokeAgent: chat=${chatId} user=${userTag} (${ctx.senderTelegramId})`);
+  console.log(`[agent] invokeAgent: chat=${chatId} user=${userTag} (${ctx.senderTelegramId})${replyToText ? ` replyTo="${replyToText.slice(0, 80)}"` : ""}`);
 
   const tools = buildTools(ctx);
   const history = await loadChatHistory(chatId);
 
   const chatType = chatId.startsWith("-") ? "a group chat" : "a private chat";
-  const systemPrompt =
+  let systemPrompt =
     `${BASE_SYSTEM_PROMPT}\n\n` +
     `You are in ${chatType} with ${userTag} (Telegram ID: ${ctx.senderTelegramId}). ` +
     `All tools that act on behalf of "the current user" will operate as this person.`;
+
+  if (replyToText) {
+    systemPrompt += `\n\nThe user's current message is a reply to a previous message that said: "${replyToText}". Take this into account when responding.`;
+  }
 
   console.log(`[agent] calling LLM (model=${OPENROUTER_MODEL}, tools=${tools.length}, history=${history.length})...`);
   const start = Date.now();

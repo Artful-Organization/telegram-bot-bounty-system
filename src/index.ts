@@ -711,6 +711,7 @@ bot.on("message:voice", async (ctx) => {
 
     await ctx.reply(`🗣 ${text}`, { reply_parameters: { message_id: ctx.message.message_id } });
 
+    const replyToText = ctx.message.reply_to_message?.text ?? undefined;
     const response = await invokeAgent(ctx.chat.id.toString(), {
       senderTelegramId: telegramId,
       senderUsername: username,
@@ -727,7 +728,7 @@ bot.on("message:voice", async (ctx) => {
           }
         }
       },
-    });
+    }, replyToText);
     typing.stop();
     log("voice", telegramId, username, `agent response: ${response.slice(0, 120)}`);
     await ctx.reply(response, { link_preview_options: { is_disabled: true } });
@@ -747,7 +748,8 @@ bot.on("message:text", async (ctx) => {
 
   syncProfile(ctx.from!);
   const username = ctx.from?.username ?? null;
-  log("agent", telegramId, username, `message: ${text}`);
+  const replyToText = ctx.message.reply_to_message?.text ?? undefined;
+  log("agent", telegramId, username, `message: ${text}${replyToText ? ` (reply to: "${replyToText.slice(0, 80)}")` : ""}`);
 
   const typing = startTyping(ctx);
 
@@ -768,7 +770,7 @@ bot.on("message:text", async (ctx) => {
           }
         }
       },
-    });
+    }, replyToText);
     typing.stop();
     log("agent", telegramId, username, `response: ${response.slice(0, 120)}`);
     await ctx.reply(response, { link_preview_options: { is_disabled: true } });
