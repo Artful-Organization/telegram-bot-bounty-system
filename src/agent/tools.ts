@@ -1,7 +1,8 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { User } from "../db/models/user.model.js";
-import { validateTransfer, getTokenSymbol } from "../services/transfer.service.js";
+import { validateTransfer, getTokenSymbol, formatBalance } from "../services/transfer.service.js";
+import type { Hex } from "viem";
 import {
   createBounty,
   listOpenBounties,
@@ -94,6 +95,44 @@ const getUsersTool = tool(
     }),
   },
 );
+
+function createGetBalanceTool(ctx: ToolContext) {
+  return tool(
+    async ({ username }) => {
+      const target = username ?? ctx.senderUsername ?? ctx.senderTelegramId;
+      const filter = username
+        ? {
+            $or: [
+              { telegramId: username },
+              { username: { $regex: new RegExp(`^${escapeRegex(username)}$`, "i") } },
+            ],
+          }
+        : { telegramId: ctx.senderTelegramId };
+
+      const user = await User.findOne(filter).lean();
+      if (!user) {
+        return username
+          ? `No user found matching "${username}".`
+          : "You don't have a wallet yet. Use /start first.";
+      }
+
+      const balance = await formatBalance(user.smartAccountAddress as Hex);
+      const tag = user.username ? `@${user.username}` : (user.displayName ?? user.telegramId);
+      return `${tag}'s balance: ${balance}`;
+    },
+    {
+      name: "get_balance",
+      description:
+        "Check a user's token balance. Omit username to check the current user's balance.",
+      schema: z.object({
+        username: z
+          .string()
+          .optional()
+          .describe("The Telegram username or ID to check (without @). Omit to check the current user's balance."),
+      }),
+    },
+  );
+}
 
 function createTransferTool(ctx: ToolContext) {
   return tool(
@@ -243,6 +282,7 @@ function createCancelBountyTool(ctx: ToolContext) {
 export function buildTools(ctx: ToolContext) {
   return [
     getUsersTool,
+    createGetBalanceTool(ctx),
     createTransferTool(ctx),
     createBountyTool(ctx),
     createListBountiesTool(ctx),
