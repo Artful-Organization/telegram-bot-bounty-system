@@ -1,0 +1,27 @@
+{
+  "name": "aa-telegram-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.1.26",
+    "@langchain/openai": "^1.2.8",
+    "dotenv": "^16.4.0",
+    "grammy": "^1.35.0",
+    "langchain": "^1.2.25",
+    "mongoose": "^8.10.0",
+    "permissionless": "^0.3.4",
+    "viem": "^2.23.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "packageManager": "pnpm@10.29.2+sha512.bef43fa759d91fd2da4b319a5a0d13ef7a45bb985a3d7342058470f9d2051a3ba8674e629672654686ef9443ad13a82da2beb9eeb3e0221c87b8154fff9d74b8"
+}

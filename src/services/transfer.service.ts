@@ -3,6 +3,10 @@ import { publicClient, TOKEN_CONTRACT_ADDRESS } from "../config.js";
 import { buildSmartAccountClient } from "./wallet.service.js";
 import { User } from "../db/models/user.model.js";
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export type TransferSuccess = {
   success: true;
   txHash: Hex;
@@ -23,20 +27,26 @@ export async function getTokenBalance(walletAddress: Hex): Promise<bigint> {
   });
 }
 
+let _decimalsCache: number | null = null;
 export async function getTokenDecimals(): Promise<number> {
-  return publicClient.readContract({
+  if (_decimalsCache !== null) return _decimalsCache;
+  _decimalsCache = await publicClient.readContract({
     address: TOKEN_CONTRACT_ADDRESS,
     abi: erc20Abi,
     functionName: "decimals",
   });
+  return _decimalsCache;
 }
 
+let _symbolCache: string | null = null;
 export async function getTokenSymbol(): Promise<string> {
-  return publicClient.readContract({
+  if (_symbolCache !== null) return _symbolCache;
+  _symbolCache = await publicClient.readContract({
     address: TOKEN_CONTRACT_ADDRESS,
     abi: erc20Abi,
     functionName: "symbol",
   });
+  return _symbolCache;
 }
 
 export async function formatBalance(walletAddress: Hex): Promise<string> {
@@ -74,6 +84,43 @@ export async function sendTokens(
   return txHash;
 }
 
+export type ValidateTransferResult =
+  | { success: true; symbol: string }
+  | { success: false; error: string };
+
+export async function validateTransfer(
+  senderTelegramId: string,
+  recipientUsername: string,
+  amountStr: string,
+): Promise<ValidateTransferResult> {
+  const sender = await User.findOne({ telegramId: senderTelegramId });
+  if (!sender) {
+    return { success: false, error: "You don't have a wallet yet. Use /start first." };
+  }
+
+  const recipient = await User.findOne({
+    username: { $regex: new RegExp(`^${escapeRegex(recipientUsername)}$`, "i") },
+  });
+  if (!recipient) {
+    return { success: false, error: `@${recipientUsername} doesn't have a wallet. They need to /start first.` };
+  }
+
+  if (sender.telegramId === recipient.telegramId) {
+    return { success: false, error: "You can't send tokens to yourself." };
+  }
+
+  const decimals = await getTokenDecimals();
+  const amount = parseUnits(amountStr, decimals);
+  const balance = await getTokenBalance(sender.smartAccountAddress as Hex);
+  if (balance < amount) {
+    const formatted = await formatBalance(sender.smartAccountAddress as Hex);
+    return { success: false, error: `Insufficient balance. You have ${formatted}.` };
+  }
+
+  const symbol = await getTokenSymbol();
+  return { success: true, symbol };
+}
+
 export async function performTransfer(
   senderTelegramId: string,
   recipientUsername: string,
@@ -88,7 +135,7 @@ export async function performTransfer(
   }
 
   const recipient = await User.findOne({
-    username: { $regex: new RegExp(`^${recipientUsername}$`, "i") },
+    username: { $regex: new RegExp(`^${escapeRegex(recipientUsername)}$`, "i") },
   });
   if (!recipient) {
     console.log(`[transfer] recipient @${recipientUsername} not found`);

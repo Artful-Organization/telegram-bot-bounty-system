@@ -10,29 +10,52 @@ import {
   sendTokens,
 } from "./transfer.service.js";
 
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function generateShortId(): string {
   return crypto.randomBytes(3).toString("hex");
 }
+
+export type CreateBountyResult =
+  | { success: true; bounty: { shortId: string } }
+  | { success: false; error: string };
 
 export async function createBounty(
   creatorTelegramId: string,
   description: string,
   amount: string,
-) {
+): Promise<CreateBountyResult> {
   console.log(`[bounty] creating bounty: creator=${creatorTelegramId} amount=${amount} desc="${description}"`);
+
+  const creator = await User.findOne({ telegramId: creatorTelegramId });
+  if (!creator) {
+    return { success: false, error: "You don't have a wallet yet. Use /start first." };
+  }
+
+  const decimals = await getTokenDecimals();
+  const amountWei = parseUnits(amount, decimals);
+  const balance = await getTokenBalance(creator.smartAccountAddress as Hex);
+  if (balance < amountWei) {
+    const formatted = await formatBalance(creator.smartAccountAddress as Hex);
+    console.log(`[bounty] create rejected: insufficient balance ${formatted}`);
+    return { success: false, error: `Insufficient balance to cover the reward. You have ${formatted}.` };
+  }
+
   let shortId = generateShortId();
   while (await Bounty.exists({ shortId })) {
     shortId = generateShortId();
   }
 
-  const bounty = await Bounty.create({
+  await Bounty.create({
     shortId,
     creatorTelegramId,
     description,
     amount,
   });
   console.log(`[bounty] created #${shortId}`);
-  return bounty;
+  return { success: true, bounty: { shortId } };
 }
 
 export async function listOpenBounties(search?: string) {
@@ -40,7 +63,7 @@ export async function listOpenBounties(search?: string) {
   const filter: Record<string, unknown> = { status: "open" };
 
   if (search) {
-    const regex = new RegExp(search, "i");
+    const regex = new RegExp(escapeRegex(search), "i");
     const matchingUsers = await User.find({
       $or: [{ telegramId: search }, { username: regex }, { displayName: regex }],
     }).select("telegramId").lean();

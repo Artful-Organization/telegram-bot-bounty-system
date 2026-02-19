@@ -1,7 +1,7 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { User } from "../db/models/user.model.js";
-import { performTransfer, getTokenSymbol } from "../services/transfer.service.js";
+import { validateTransfer, getTokenSymbol } from "../services/transfer.service.js";
 import {
   createBounty,
   listOpenBounties,
@@ -9,6 +9,10 @@ import {
   cancelBounty,
 } from "../services/bounty.service.js";
 import { Bounty } from "../db/models/bounty.model.js";
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 export type NotifyRecipientFn = (
   recipientTelegramId: string,
@@ -35,6 +39,12 @@ export type NotifySenderFn = (
 
 export type PostBountyFn = (bountyMessage: string) => Promise<void>;
 
+export type RequestTransferConfirmFn = (
+  recipientUsername: string,
+  amount: string,
+  symbol: string,
+) => Promise<void>;
+
 export interface ToolContext {
   senderTelegramId: string;
   senderUsername: string | null;
@@ -43,6 +53,7 @@ export interface ToolContext {
   notifySender: NotifySenderFn;
   notifyBountyCreator: NotifyBountyClaimFn;
   postBounty: PostBountyFn;
+  requestTransferConfirm: RequestTransferConfirmFn;
 }
 
 const getUsersTool = tool(
@@ -51,8 +62,8 @@ const getUsersTool = tool(
       ? {
           $or: [
             { telegramId: search },
-            { username: { $regex: new RegExp(search, "i") } },
-            { displayName: { $regex: new RegExp(search, "i") } },
+            { username: { $regex: new RegExp(escapeRegex(search), "i") } },
+            { displayName: { $regex: new RegExp(escapeRegex(search), "i") } },
           ],
         }
       : {};
@@ -87,30 +98,19 @@ const getUsersTool = tool(
 function createTransferTool(ctx: ToolContext) {
   return tool(
     async ({ recipientUsername, amount: amountStr }) => {
-      const result = await performTransfer(ctx.senderTelegramId, recipientUsername, amountStr);
+      const validation = await validateTransfer(ctx.senderTelegramId, recipientUsername, amountStr);
+      if (!validation.success) return validation.error;
 
-      if (!result.success) return result.error;
+      await ctx.requestTransferConfirm(recipientUsername, amountStr, validation.symbol);
 
-      await ctx.notifyRecipient(
-        result.recipientTelegramId,
-        result.senderUsername,
-        amountStr,
-        result.txHash,
-      );
-      await ctx.notifySender(
-        ctx.senderTelegramId,
-        result.recipientUsername,
-        amountStr,
-        result.txHash,
-      );
-
-      return `Successfully sent ${amountStr} $${result.symbol} to @${recipientUsername}. Transaction: ${result.txHash}`;
+      return `Transfer of ${amountStr} $${validation.symbol} to @${recipientUsername} requires confirmation. A confirmation prompt has been sent — the user must tap Confirm or Cancel. Do NOT tell the user the transfer is complete.`;
     },
     {
       name: "transfer_money",
       description:
         "Transfer tokens from the current user's wallet to another user by username. " +
-        "The sender is the user who initiated the conversation.",
+        "The sender is the user who initiated the conversation. " +
+        "This will send a confirmation prompt — the transfer is NOT executed immediately.",
       schema: z.object({
         recipientUsername: z
           .string()
@@ -126,12 +126,13 @@ function createTransferTool(ctx: ToolContext) {
 function createBountyTool(ctx: ToolContext) {
   return tool(
     async ({ description, amount }) => {
-      const user = await User.findOne({ telegramId: ctx.senderTelegramId });
-      if (!user) return "You don't have a wallet yet. Use /start first.";
+      const result = await createBounty(ctx.senderTelegramId, description, amount);
+      if (!result.success) return result.error;
 
-      const bounty = await createBounty(ctx.senderTelegramId, description, amount);
+      const { bounty } = result;
       const symbol = await getTokenSymbol();
-      const poster = user.username ? `@${user.username}` : (user.displayName ?? "Someone");
+      const user = await User.findOne({ telegramId: ctx.senderTelegramId });
+      const poster = user?.username ? `@${user.username}` : (user?.displayName ?? "Someone");
 
       const bountyMsg =
         `<b>Bounty #${bounty.shortId}</b>\n\n` +

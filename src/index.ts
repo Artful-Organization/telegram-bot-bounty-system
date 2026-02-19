@@ -1,3 +1,5 @@
+import crypto from "node:crypto";
+import mongoose from "mongoose";
 import { Bot, InlineKeyboard } from "grammy";
 import { parseUnits, type Hex } from "viem";
 import { BOT_TOKEN, chain, OWNER_PRIVATE_KEY, OWNER_SAFE_ADDRESS, ADMIN_TELEGRAM_ID, BOUNTY_CHAT_ID, TOKEN_CONTRACT_ADDRESS } from "./config.js";
@@ -12,6 +14,10 @@ import {
   getTokenSymbol,
   performTransfer,
 } from "./services/transfer.service.js";
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 import {
   createBounty,
   listOpenBounties,
@@ -133,6 +139,19 @@ async function notifySender(senderTelegramId: string, recipientUsername: string 
     console.error(`[notify] FAILED to notify sender ${senderTelegramId}:`, err);
   }
 }
+
+interface PendingTransfer {
+  senderTelegramId: string;
+  senderUsername: string | null;
+  recipientUsername: string;
+  amount: string;
+  symbol: string;
+  chatId: string;
+  createdAt: number;
+}
+
+const pendingTransfers = new Map<string, PendingTransfer>();
+const PENDING_TRANSFER_TTL = 5 * 60 * 1000;
 
 bot.command("start", async (ctx) => {
   const telegramId = ctx.from?.id.toString();
@@ -267,7 +286,7 @@ bot.command("fund", async (ctx) => {
   log("fund", telegramId, username, `funding @${recipientUsername} with ${amountStr}`);
 
   const recipient = await User.findOne({
-    username: { $regex: new RegExp(`^${recipientUsername}$`, "i") },
+    username: { $regex: new RegExp(`^${escapeRegex(recipientUsername)}$`, "i") },
   });
   if (!recipient) {
     log("fund", telegramId, username, `recipient @${recipientUsername} not found`);
@@ -381,13 +400,16 @@ bot.command("bounty", async (ctx) => {
     return ctx.reply("Invalid amount. Must be a positive number.");
   }
 
-  const user = await User.findOne({ telegramId });
-  if (!user) return ctx.reply("You don't have a wallet yet. Use /start first.");
-
   log("bounty", telegramId, username, `creating bounty: "${description}" for ${amountStr}`);
 
   try {
-    const bounty = await createBounty(telegramId, description, amountStr);
+    const result = await createBounty(telegramId, description, amountStr);
+    if (!result.success) {
+      log("bounty", telegramId, username, `rejected: ${result.error}`);
+      return ctx.reply(result.error);
+    }
+
+    const { bounty } = result;
     const symbol = await getTokenSymbol();
     const poster = username ? `@${username}` : buildDisplayName(ctx.from!);
 
@@ -477,25 +499,16 @@ bot.command("claim", async (ctx) => {
     if (!bounty) return ctx.reply("Bounty not found.");
 
     const creator = await User.findOne({ telegramId: bounty.creatorTelegramId });
-    const claimerTag = username ? `@${username}` : buildDisplayName(ctx.from!);
     const symbol = await getTokenSymbol();
 
-    const keyboard = new InlineKeyboard()
-      .text("Confirm", `bounty_confirm_${shortId}`)
-      .text("Deny", `bounty_deny_${shortId}`);
-
-    try {
-      await bot.api.sendMessage(
-        bounty.creatorTelegramId,
-        `<b>Bounty Claim</b>\n\n` +
-        `${claimerTag} claims to have completed your bounty:\n\n` +
-        `<b>#${shortId}</b> — ${bounty.description}\n` +
-        `Reward: <b>${bounty.amount} $${symbol}</b>`,
-        { parse_mode: "HTML", reply_markup: keyboard },
-      );
-    } catch {
-      log("claim", telegramId, username, `failed to DM bounty creator ${bounty.creatorTelegramId}`);
-    }
+    await notifyBountyCreator(
+      bounty.creatorTelegramId,
+      username,
+      shortId,
+      bounty.description,
+      bounty.amount,
+      symbol,
+    );
 
     log("claim", telegramId, username, `claimed bounty #${shortId}`);
 
@@ -545,6 +558,72 @@ bot.on("callback_query:data", async (ctx) => {
   const username = ctx.from?.username ?? null;
 
   log("callback", telegramId, username, `callback_query: ${data}`);
+
+  const transferConfirmMatch = data.match(/^transfer_confirm_(.+)$/);
+  const transferCancelMatch = data.match(/^transfer_cancel_(.+)$/);
+
+  if (transferConfirmMatch || transferCancelMatch) {
+    const transferId = (transferConfirmMatch ?? transferCancelMatch)![1];
+    const pending = pendingTransfers.get(transferId);
+
+    if (!pending) {
+      return ctx.answerCallbackQuery({ text: "This transfer is no longer available." });
+    }
+    if (Date.now() - pending.createdAt > PENDING_TRANSFER_TTL) {
+      pendingTransfers.delete(transferId);
+      await ctx.editMessageText("This transfer has expired.", { parse_mode: "HTML" });
+      return ctx.answerCallbackQuery({ text: "Transfer expired." });
+    }
+    if (pending.senderTelegramId !== telegramId) {
+      return ctx.answerCallbackQuery({ text: "Only the sender can confirm this transfer." });
+    }
+
+    if (transferCancelMatch) {
+      pendingTransfers.delete(transferId);
+      log("transfer_cancel", telegramId, username, `cancelled transfer of ${pending.amount} to @${pending.recipientUsername}`);
+      await ctx.editMessageText(
+        `<b>Transfer Cancelled</b>\n\n${pending.amount} $${pending.symbol} to @${pending.recipientUsername} was cancelled.`,
+        { parse_mode: "HTML" },
+      );
+      return ctx.answerCallbackQuery({ text: "Transfer cancelled." });
+    }
+
+    pendingTransfers.delete(transferId);
+    log("transfer_confirm", telegramId, username, `confirming transfer of ${pending.amount} to @${pending.recipientUsername}`);
+    await ctx.answerCallbackQuery({ text: "Processing transfer..." });
+
+    try {
+      const result = await performTransfer(pending.senderTelegramId, pending.recipientUsername, pending.amount);
+
+      if (!result.success) {
+        log("transfer_confirm", telegramId, username, `rejected: ${result.error}`);
+        await ctx.editMessageText(
+          `<b>Transfer Failed</b>\n\n${result.error}`,
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+
+      log("transfer_confirm", telegramId, username, `SUCCESS tx=${result.txHash}`);
+
+      await ctx.editMessageText(
+        `<b>Transfer Complete</b>\n\n` +
+        `Sent ${pending.amount} $${pending.symbol} to @${pending.recipientUsername}!\n\n` +
+        `<a href="${explorerBaseUrl}/tx/${result.txHash}">View Transaction</a>`,
+        { parse_mode: "HTML", link_preview_options: { is_disabled: true } },
+      );
+
+      await notifyRecipient(result.recipientTelegramId, pending.senderUsername, pending.amount, result.txHash);
+      await notifySender(pending.senderTelegramId, result.recipientUsername, pending.amount, result.txHash);
+    } catch (err) {
+      log("transfer_confirm", telegramId, username, `FAILED: ${err}`);
+      await ctx.editMessageText(
+        `<b>Transfer Failed</b>\n\nSomething went wrong. Please try again.`,
+        { parse_mode: "HTML" },
+      );
+    }
+    return;
+  }
 
   const confirmMatch = data.match(/^bounty_confirm_(.+)$/);
   const denyMatch = data.match(/^bounty_deny_(.+)$/);
@@ -712,7 +791,8 @@ bot.on("message:voice", async (ctx) => {
     await ctx.reply(`🗣 ${text}`, { reply_parameters: { message_id: ctx.message.message_id } });
 
     const replyToText = ctx.message.reply_to_message?.text ?? undefined;
-    const response = await invokeAgent(ctx.chat.id.toString(), {
+    const chatId = ctx.chat.id.toString();
+    const response = await invokeAgent(chatId, {
       senderTelegramId: telegramId,
       senderUsername: username,
       senderDisplayName: buildDisplayName(ctx.from!),
@@ -727,6 +807,26 @@ bot.on("message:voice", async (ctx) => {
             console.error("Failed to post bounty to group:", err);
           }
         }
+      },
+      requestTransferConfirm: async (recipientUsername, amount, symbol) => {
+        const id = crypto.randomBytes(8).toString("hex");
+        pendingTransfers.set(id, {
+          senderTelegramId: telegramId,
+          senderUsername: username,
+          recipientUsername,
+          amount,
+          symbol,
+          chatId,
+          createdAt: Date.now(),
+        });
+        const keyboard = new InlineKeyboard()
+          .text("Confirm", `transfer_confirm_${id}`)
+          .text("Cancel", `transfer_cancel_${id}`);
+        await bot.api.sendMessage(
+          ctx.chat.id,
+          `<b>Confirm Transfer</b>\n\nSend <b>${amount} $${symbol}</b> to @${recipientUsername}?`,
+          { parse_mode: "HTML", reply_markup: keyboard },
+        );
       },
     }, replyToText);
     typing.stop();
@@ -752,9 +852,10 @@ bot.on("message:text", async (ctx) => {
   log("agent", telegramId, username, `message: ${text}${replyToText ? ` (reply to: "${replyToText.slice(0, 80)}")` : ""}`);
 
   const typing = startTyping(ctx);
+  const chatId = ctx.chat.id.toString();
 
   try {
-    const response = await invokeAgent(ctx.chat.id.toString(), {
+    const response = await invokeAgent(chatId, {
       senderTelegramId: telegramId,
       senderUsername: username,
       senderDisplayName: buildDisplayName(ctx.from!),
@@ -769,6 +870,26 @@ bot.on("message:text", async (ctx) => {
             console.error("Failed to post bounty to group:", err);
           }
         }
+      },
+      requestTransferConfirm: async (recipientUsername, amount, symbol) => {
+        const id = crypto.randomBytes(8).toString("hex");
+        pendingTransfers.set(id, {
+          senderTelegramId: telegramId,
+          senderUsername: username,
+          recipientUsername,
+          amount,
+          symbol,
+          chatId,
+          createdAt: Date.now(),
+        });
+        const keyboard = new InlineKeyboard()
+          .text("Confirm", `transfer_confirm_${id}`)
+          .text("Cancel", `transfer_cancel_${id}`);
+        await bot.api.sendMessage(
+          ctx.chat.id,
+          `<b>Confirm Transfer</b>\n\nSend <b>${amount} $${symbol}</b> to @${recipientUsername}?`,
+          { parse_mode: "HTML", reply_markup: keyboard },
+        );
       },
     }, replyToText);
     typing.stop();
@@ -802,6 +923,17 @@ async function main() {
   console.log(`[bot] admin: ${ADMIN_TELEGRAM_ID || "none"}`);
   console.log(`[bot] bounty chat: ${BOUNTY_CHAT_ID || "none"}`);
   console.log("[bot] starting...");
+
+  const shutdown = async (signal: string) => {
+    console.log(`[bot] received ${signal}, shutting down gracefully...`);
+    bot.stop();
+    await mongoose.disconnect();
+    console.log("[bot] shutdown complete");
+    process.exit(0);
+  };
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
   bot.start();
 }
 

@@ -24,7 +24,16 @@ export async function createWallet() {
   return { address: safeAccount.address, privateKey: privKey };
 }
 
+const CLIENT_TTL_MS = 5 * 60 * 1000;
+const clientCache = new Map<string, { client: Awaited<ReturnType<typeof createSmartAccountClient>>; expiry: number }>();
+
 export async function buildSmartAccountClient(privateKey: Hex) {
+  const cached = clientCache.get(privateKey);
+  if (cached && Date.now() < cached.expiry) {
+    console.log("[wallet] using cached smart account client");
+    return cached.client;
+  }
+
   console.log("[wallet] building smart account client...");
   const signer = privateKeyToAccount(privateKey);
 
@@ -39,7 +48,7 @@ export async function buildSmartAccountClient(privateKey: Hex) {
   });
 
   console.log(`[wallet] smart account ready: ${safeAccount.address}`);
-  return createSmartAccountClient({
+  const client = createSmartAccountClient({
     account: safeAccount,
     chain,
     bundlerTransport: http(pimlicoUrl),
@@ -49,4 +58,7 @@ export async function buildSmartAccountClient(privateKey: Hex) {
         (await pimlicoClient.getUserOperationGasPrice()).fast,
     },
   });
+
+  clientCache.set(privateKey, { client, expiry: Date.now() + CLIENT_TTL_MS });
+  return client;
 }

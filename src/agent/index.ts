@@ -15,6 +15,8 @@ const BASE_SYSTEM_PROMPT =
   "You are a helpful wallet assistant for a Telegram-based token transfer bot. " +
   "You can look up registered users, transfer tokens, and manage bounties on behalf of the user. " +
   "When the user asks to send money, extract the recipient username and amount, then use the transfer_money tool. " +
+  "The transfer_money tool does NOT execute immediately — it sends a confirmation prompt with Confirm/Cancel buttons. " +
+  "After calling it, tell the user to tap Confirm to proceed. Do NOT say the transfer is complete. " +
   "When the user asks about users or wallets, use the get_users tool. " +
   "When the user wants to post a bounty/task with a reward, use the create_bounty tool. " +
   "When the user wants to see available bounties, use the list_bounties tool. " +
@@ -74,9 +76,13 @@ export async function invokeAgent(
     systemPrompt,
   });
 
-  const result = await agent.invoke({
-    messages: history,
-  });
+  const AGENT_TIMEOUT_MS = 90_000;
+  const result = await Promise.race([
+    agent.invoke({ messages: history }),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Agent timed out after 90s")), AGENT_TIMEOUT_MS),
+    ),
+  ]);
 
   const elapsed = Date.now() - start;
   console.log(`[agent] LLM responded in ${elapsed}ms (${result.messages.length} messages)`);
