@@ -50,6 +50,7 @@ const getUsersTool = tool(
     const filter = search
       ? {
           $or: [
+            { telegramId: search },
             { username: { $regex: new RegExp(search, "i") } },
             { displayName: { $regex: new RegExp(search, "i") } },
           ],
@@ -71,14 +72,14 @@ const getUsersTool = tool(
   {
     name: "get_users",
     description:
-      "Search registered users by username or display name (partial, case-insensitive). " +
+      "Search registered users by Telegram ID, username, or display name (partial, case-insensitive). " +
       "Omit search to list all users. " +
       "Returns telegramId, username, displayName, smartAccountAddress, isDeployed, and createdAt.",
     schema: z.object({
       search: z
         .string()
         .optional()
-        .describe("Search term to match against username or display name (case-insensitive, partial match). Don't use @ prefix."),
+        .describe("Search by Telegram ID (exact), or username/display name (case-insensitive, partial match). Don't use @ prefix."),
     }),
   },
 );
@@ -166,9 +167,10 @@ function createListBountiesTool(ctx: ToolContext) {
       }
 
       const symbol = await getTokenSymbol();
-      const lines = bounties.map(
-        (b) => `#${b.shortId} — ${b.amount} $${symbol}: ${b.description}`,
-      );
+      const lines = bounties.map((b) => {
+        const poster = b.creatorUsername ? `@${b.creatorUsername}` : (b.creatorDisplayName ?? "Unknown");
+        return `#${b.shortId} — ${b.amount} $${symbol}: ${b.description} (by ${poster})`;
+      });
       return lines.join("\n");
     },
     {

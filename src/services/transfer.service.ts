@@ -53,8 +53,10 @@ export async function sendTokens(
   toAddress: Hex,
   amount: bigint,
 ): Promise<Hex> {
+  console.log(`[transfer] sending ${amount} tokens to ${toAddress}...`);
   const client = await buildSmartAccountClient(fromPrivateKey);
 
+  console.log("[transfer] submitting UserOperation...");
   const txHash = await client.sendTransaction({
     calls: [
       {
@@ -68,6 +70,7 @@ export async function sendTokens(
     ],
   });
 
+  console.log(`[transfer] tx confirmed: ${txHash}`);
   return txHash;
 }
 
@@ -76,28 +79,38 @@ export async function performTransfer(
   recipientUsername: string,
   amountStr: string,
 ): Promise<TransferResult> {
+  console.log(`[transfer] performTransfer: ${senderTelegramId} -> @${recipientUsername} amount=${amountStr}`);
+
   const sender = await User.findOne({ telegramId: senderTelegramId });
-  if (!sender)
+  if (!sender) {
+    console.log(`[transfer] sender ${senderTelegramId} not found`);
     return { success: false, error: "You don't have a wallet yet. Use /start first." };
+  }
 
   const recipient = await User.findOne({
     username: { $regex: new RegExp(`^${recipientUsername}$`, "i") },
   });
-  if (!recipient)
+  if (!recipient) {
+    console.log(`[transfer] recipient @${recipientUsername} not found`);
     return {
       success: false,
       error: `@${recipientUsername} doesn't have a wallet. They need to /start first.`,
     };
+  }
 
-  if (sender.telegramId === recipient.telegramId)
+  if (sender.telegramId === recipient.telegramId) {
+    console.log("[transfer] rejected: self-transfer");
     return { success: false, error: "You can't send tokens to yourself." };
+  }
 
   const decimals = await getTokenDecimals();
   const amount = parseUnits(amountStr, decimals);
 
   const balance = await getTokenBalance(sender.smartAccountAddress as Hex);
+  console.log(`[transfer] sender balance: ${formatUnits(balance, decimals)}, needed: ${amountStr}`);
   if (balance < amount) {
     const formatted = await formatBalance(sender.smartAccountAddress as Hex);
+    console.log(`[transfer] insufficient balance: ${formatted}`);
     return { success: false, error: `Insufficient balance. You have ${formatted}.` };
   }
 
@@ -110,6 +123,7 @@ export async function performTransfer(
   await User.updateOne({ telegramId: senderTelegramId }, { isDeployed: true });
 
   const symbol = await getTokenSymbol();
+  console.log(`[transfer] SUCCESS: ${amountStr} $${symbol} from @${sender.username} to @${recipient.username} tx=${txHash}`);
   return {
     success: true,
     txHash,

@@ -26,12 +26,14 @@ const BASE_SYSTEM_PROMPT =
   "Keep responses concise and friendly.";
 
 async function loadChatHistory(chatId: string) {
+  console.log(`[agent] loading chat history for chat=${chatId}`);
   const rows = await ChatMessage.find({ chatId })
     .sort({ createdAt: -1 })
     .limit(15)
     .lean();
 
   rows.reverse();
+  console.log(`[agent] loaded ${rows.length} messages from history`);
 
   return rows.map((m) => {
     if (m.isBot) return new AIMessage(m.text);
@@ -46,15 +48,20 @@ export async function invokeAgent(
   chatId: string,
   ctx: ToolContext,
 ): Promise<string> {
+  const userTag = ctx.senderUsername ? `@${ctx.senderUsername}` : ctx.senderDisplayName;
+  console.log(`[agent] invokeAgent: chat=${chatId} user=${userTag} (${ctx.senderTelegramId})`);
+
   const tools = buildTools(ctx);
   const history = await loadChatHistory(chatId);
 
-  const userTag = ctx.senderUsername ? `@${ctx.senderUsername}` : ctx.senderDisplayName;
   const chatType = chatId.startsWith("-") ? "a group chat" : "a private chat";
   const systemPrompt =
     `${BASE_SYSTEM_PROMPT}\n\n` +
     `You are in ${chatType} with ${userTag} (Telegram ID: ${ctx.senderTelegramId}). ` +
     `All tools that act on behalf of "the current user" will operate as this person.`;
+
+  console.log(`[agent] calling LLM (model=${OPENROUTER_MODEL}, tools=${tools.length}, history=${history.length})...`);
+  const start = Date.now();
 
   const agent = createAgent({
     model: llm,
@@ -66,10 +73,15 @@ export async function invokeAgent(
     messages: history,
   });
 
+  const elapsed = Date.now() - start;
+  console.log(`[agent] LLM responded in ${elapsed}ms (${result.messages.length} messages)`);
+
   const lastMessage = result.messages.at(-1);
-  if (lastMessage instanceof AIMessage && typeof lastMessage.content === "string") {
+  if (lastMessage instanceof AIMessage && typeof lastMessage.content === "string" && lastMessage.content.trim()) {
+    console.log(`[agent] response: "${lastMessage.content.slice(0, 120)}${lastMessage.content.length > 120 ? "..." : ""}"`);
     return lastMessage.content;
   }
 
+  console.log(`[agent] no usable AI response (last message type=${lastMessage?.constructor?.name}, content=${JSON.stringify(lastMessage && "content" in lastMessage ? lastMessage.content : null)})`);
   return "Sorry, I couldn't process that request.";
 }

@@ -1,6 +1,6 @@
 import { Bot, InlineKeyboard } from "grammy";
 import { parseUnits, type Hex } from "viem";
-import { BOT_TOKEN, chain, OWNER_PRIVATE_KEY, OWNER_SAFE_ADDRESS, ADMIN_TELEGRAM_ID, BOUNTY_CHAT_ID } from "./config.js";
+import { BOT_TOKEN, chain, OWNER_PRIVATE_KEY, OWNER_SAFE_ADDRESS, ADMIN_TELEGRAM_ID, BOUNTY_CHAT_ID, TOKEN_CONTRACT_ADDRESS } from "./config.js";
 import { connectDB } from "./db/connection.js";
 import { User } from "./db/models/user.model.js";
 import { createWallet } from "./services/wallet.service.js";
@@ -23,6 +23,7 @@ import {
 import { Bounty } from "./db/models/bounty.model.js";
 import { ChatMessage } from "./db/models/chat-message.model.js";
 import { invokeAgent } from "./agent/index.js";
+import { transcribeAudio } from "./services/transcription.service.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -91,31 +92,45 @@ function syncProfile(from: { id: number; username?: string; first_name: string; 
   ).catch(() => {});
 }
 
+function startTyping(ctx: { chat: { id: number } }) {
+  const chatId = ctx.chat.id;
+  bot.api.sendChatAction(chatId, "typing").catch(() => {});
+  const interval = setInterval(() => {
+    bot.api.sendChatAction(chatId, "typing").catch(() => {});
+  }, 4000);
+  const timeout = setTimeout(() => clearInterval(interval), 60_000);
+  return { stop: () => { clearInterval(interval); clearTimeout(timeout); } };
+}
+
 async function notifyRecipient(recipientTelegramId: string, senderUsername: string | null, amountStr: string, txHash: string) {
   const senderTag = senderUsername ? `@${senderUsername}` : "Someone";
   const symbol = await getTokenSymbol();
+  console.log(`[notify] notifying recipient ${recipientTelegramId}: received ${amountStr} $${symbol} from ${senderTag}`);
   try {
     await bot.api.sendMessage(
       recipientTelegramId,
       `You received ${amountStr} $${symbol} from ${senderTag}!\n\n<a href="${explorerBaseUrl}/tx/${txHash}">View Transaction</a>`,
       { parse_mode: "HTML", link_preview_options: { is_disabled: true } },
     );
+    console.log(`[notify] recipient ${recipientTelegramId} notified`);
   } catch (err) {
-    console.error(`Failed to notify recipient ${recipientTelegramId}:`, err);
+    console.error(`[notify] FAILED to notify recipient ${recipientTelegramId}:`, err);
   }
 }
 
 async function notifySender(senderTelegramId: string, recipientUsername: string | null, amountStr: string, txHash: string) {
   const recipientTag = recipientUsername ? `@${recipientUsername}` : "someone";
   const symbol = await getTokenSymbol();
+  console.log(`[notify] notifying sender ${senderTelegramId}: sent ${amountStr} $${symbol} to ${recipientTag}`);
   try {
     await bot.api.sendMessage(
       senderTelegramId,
       `You sent ${amountStr} $${symbol} to ${recipientTag}.\n\n<a href="${explorerBaseUrl}/tx/${txHash}">View Transaction</a>`,
       { parse_mode: "HTML", link_preview_options: { is_disabled: true } },
     );
+    console.log(`[notify] sender ${senderTelegramId} notified`);
   } catch (err) {
-    console.error(`Failed to notify sender ${senderTelegramId}:`, err);
+    console.error(`[notify] FAILED to notify sender ${senderTelegramId}:`, err);
   }
 }
 
@@ -413,14 +428,16 @@ bot.command("bounties", async (ctx) => {
 
   try {
     const bounties = await listOpenBounties(search);
+    log("bounties", telegramId, username, `found ${bounties.length} bounties`);
     if (bounties.length === 0) {
       return ctx.reply(search ? `No open bounties matching "${search}".` : "No open bounties right now.");
     }
 
     const symbol = await getTokenSymbol();
-    const lines = bounties.map((b) =>
-      `<b>#${b.shortId}</b> — ${b.amount} $${symbol}\n${b.description}`
-    );
+    const lines = bounties.map((b) => {
+      const poster = b.creatorUsername ? `@${b.creatorUsername}` : (b.creatorDisplayName ?? "Unknown");
+      return `<b>#${b.shortId}</b> — ${b.amount} $${symbol}\n${b.description}\nby ${poster}`;
+    });
 
     const header = search ? `<b>Bounties matching "${search}"</b>` : "<b>Open Bounties</b>";
     await ctx.reply(
@@ -527,6 +544,8 @@ bot.on("callback_query:data", async (ctx) => {
   if (!telegramId) return ctx.answerCallbackQuery({ text: "Could not identify you." });
   const username = ctx.from?.username ?? null;
 
+  log("callback", telegramId, username, `callback_query: ${data}`);
+
   const confirmMatch = data.match(/^bounty_confirm_(.+)$/);
   const denyMatch = data.match(/^bounty_deny_(.+)$/);
 
@@ -632,6 +651,7 @@ async function notifyBountyCreator(
   symbol: string,
 ) {
   const claimerTag = claimerUsername ? `@${claimerUsername}` : "Someone";
+  console.log(`[notify] notifying bounty creator ${creatorTelegramId}: claim on #${bountyShortId} by ${claimerTag}`);
   const keyboard = new InlineKeyboard()
     .text("Confirm", `bounty_confirm_${bountyShortId}`)
     .text("Deny", `bounty_deny_${bountyShortId}`);
@@ -645,10 +665,78 @@ async function notifyBountyCreator(
       `Reward: <b>${bountyAmount} $${symbol}</b>`,
       { parse_mode: "HTML", reply_markup: keyboard },
     );
+    console.log(`[notify] bounty creator ${creatorTelegramId} notified with confirm/deny buttons`);
   } catch (err) {
-    console.error(`Failed to notify bounty creator ${creatorTelegramId}:`, err);
+    console.error(`[notify] FAILED to notify bounty creator ${creatorTelegramId}:`, err);
   }
 }
+
+bot.on("message:voice", async (ctx) => {
+  const telegramId = ctx.from?.id.toString();
+  if (!telegramId) return;
+
+  syncProfile(ctx.from!);
+  const username = ctx.from?.username ?? null;
+  log("voice", telegramId, username, `voice message received (${ctx.message.voice.duration}s)`);
+
+  const typing = startTyping(ctx);
+
+  try {
+    const file = await ctx.getFile();
+    log("voice", telegramId, username, `downloading file: ${file.file_path} (${file.file_size ?? "?"} bytes)`);
+    const url = `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to download voice file: ${res.status}`);
+    const audioBuffer = await res.arrayBuffer();
+    log("voice", telegramId, username, `downloaded ${audioBuffer.byteLength} bytes, transcribing...`);
+
+    const text = await transcribeAudio(audioBuffer, ctx.message.voice.mime_type ?? "audio/ogg");
+    if (!text) {
+      typing.stop();
+      await ctx.reply("Couldn't transcribe the voice message.");
+      return;
+    }
+
+    log("voice", telegramId, username, `transcribed: ${text.slice(0, 120)}`);
+
+    await ChatMessage.create({
+      chatId: ctx.chat.id.toString(),
+      messageId: ctx.message.message_id,
+      senderTelegramId: telegramId,
+      senderUsername: username ?? undefined,
+      senderDisplayName: buildDisplayName(ctx.from!),
+      isBot: false,
+      text,
+    }).catch((err) => console.error("[voice] failed to save transcribed message:", err));
+
+    await ctx.reply(`🗣 ${text}`, { reply_parameters: { message_id: ctx.message.message_id } });
+
+    const response = await invokeAgent(ctx.chat.id.toString(), {
+      senderTelegramId: telegramId,
+      senderUsername: username,
+      senderDisplayName: buildDisplayName(ctx.from!),
+      notifyRecipient,
+      notifySender,
+      notifyBountyCreator,
+      postBounty: async (msg) => {
+        if (BOUNTY_CHAT_ID) {
+          try {
+            await bot.api.sendMessage(BOUNTY_CHAT_ID, msg, { parse_mode: "HTML" });
+          } catch (err) {
+            console.error("Failed to post bounty to group:", err);
+          }
+        }
+      },
+    });
+    typing.stop();
+    log("voice", telegramId, username, `agent response: ${response.slice(0, 120)}`);
+    await ctx.reply(response, { link_preview_options: { is_disabled: true } });
+  } catch (err) {
+    typing.stop();
+    log("voice", telegramId, username, `FAILED: ${err}`);
+    await ctx.reply("Failed to process voice message. Please try again later.");
+  }
+});
 
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
@@ -660,6 +748,8 @@ bot.on("message:text", async (ctx) => {
   syncProfile(ctx.from!);
   const username = ctx.from?.username ?? null;
   log("agent", telegramId, username, `message: ${text}`);
+
+  const typing = startTyping(ctx);
 
   try {
     const response = await invokeAgent(ctx.chat.id.toString(), {
@@ -679,9 +769,11 @@ bot.on("message:text", async (ctx) => {
         }
       },
     });
+    typing.stop();
     log("agent", telegramId, username, `response: ${response.slice(0, 120)}`);
     await ctx.reply(response, { link_preview_options: { is_disabled: true } });
   } catch (err) {
+    typing.stop();
     log("agent", telegramId, username, `FAILED: ${err}`);
     await ctx.reply("Something went wrong. Please try again later.");
   }
@@ -702,7 +794,12 @@ async function main() {
     { command: "fund", description: "Admin: fund a user — /fund @username amount" },
   ]);
 
-  console.log("Bot starting...");
+  console.log("[bot] commands registered");
+  console.log(`[bot] chain: ${chain.name} (${chain.id})`);
+  console.log(`[bot] token contract: ${TOKEN_CONTRACT_ADDRESS}`);
+  console.log(`[bot] admin: ${ADMIN_TELEGRAM_ID || "none"}`);
+  console.log(`[bot] bounty chat: ${BOUNTY_CHAT_ID || "none"}`);
+  console.log("[bot] starting...");
   bot.start();
 }
 
