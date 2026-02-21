@@ -15,11 +15,13 @@
     "langchain": "^1.2.25",
     "mongoose": "^8.10.0",
     "permissionless": "^0.3.4",
+    "qrcode": "^1.5.4",
     "viem": "^2.23.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/qrcode": "^1.5.6",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   },

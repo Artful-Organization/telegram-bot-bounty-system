@@ -17,9 +17,10 @@ export const OWNER_PRIVATE_KEY = requireEnv("OWNER_PRIVATE_KEY") as Hex;
 export const OWNER_SAFE_ADDRESS = requireEnv("OWNER_SAFE_ADDRESS") as Hex;
 export const ADMIN_TELEGRAM_ID = process.env.ADMIN_TELEGRAM_ID ?? "";
 export const BOUNTY_CHAT_ID = process.env.BOUNTY_CHAT_ID ?? "";
+export const GAMES_CHAT_ID = process.env.GAMES_CHAT_ID ?? "";
 export const FIREWORKS_API_KEY = requireEnv("FIREWORKS_API_KEY");
 export const OPENROUTER_API_KEY = requireEnv("OPENROUTER_API_KEY");
-export const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? "anthropic/claude-sonnet-4";
+export const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? "google/gemini-2.5-flash-preview";
 
 const PIMLICO_API_KEY = requireEnv("PIMLICO_API_KEY");
 const RPC_URL = requireEnv("RPC_URL");

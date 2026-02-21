@@ -7,6 +7,7 @@ const userSchema = new Schema({
   smartAccountAddress: { type: String, required: true },
   privateKey: { type: String, required: true },
   isDeployed: { type: Boolean, default: false },
+  balanceMessageId: { type: Number, default: null },
   createdAt: { type: Date, default: Date.now },
 });
 

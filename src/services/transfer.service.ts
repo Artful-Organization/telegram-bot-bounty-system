@@ -121,10 +121,27 @@ export async function validateTransfer(
   return { success: true, symbol };
 }
 
+const WAIT_FOR_BLOCK_TIMEOUT = 15_000;
+
+export async function waitForBlock(txHash: Hex): Promise<void> {
+  await new Promise((r) => setTimeout(r, 1000));
+  const deadline = Date.now() + WAIT_FOR_BLOCK_TIMEOUT;
+  while (Date.now() < deadline) {
+    try {
+      await publicClient.getTransactionReceipt({ hash: txHash });
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  console.warn(`[waitForBlock] timed out waiting for receipt (tx ${txHash})`);
+}
+
 export async function performTransfer(
   senderTelegramId: string,
   recipientUsername: string,
   amountStr: string,
+  onBalanceChanged?: (telegramId: string, txHash: Hex) => void,
 ): Promise<TransferResult> {
   console.log(`[transfer] performTransfer: ${senderTelegramId} -> @${recipientUsername} amount=${amountStr}`);
 
@@ -171,6 +188,12 @@ export async function performTransfer(
 
   const symbol = await getTokenSymbol();
   console.log(`[transfer] SUCCESS: ${amountStr} $${symbol} from @${sender.username} to @${recipient.username} tx=${txHash}`);
+
+  if (onBalanceChanged) {
+    onBalanceChanged(senderTelegramId, txHash);
+    onBalanceChanged(recipient.telegramId, txHash);
+  }
+
   return {
     success: true,
     txHash,
